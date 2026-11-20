@@ -4,27 +4,60 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 import cv2
+
+TESS_TO_EASYOCR = {
+    "deu": "de", "eng": "en", "fra": "fr", "spa": "es", "ita": "it",
+    "por": "pt", "nld": "nl", "rus": "ru", "pol": "pl", "tur": "tr",
+    "ukr": "uk", "ara": "ar", "hin": "hi", "jpn": "ja", "kor": "ko",
+    "chi_sim": "ch_sim", "chi_tra": "ch_tra",
+}
+
+_easy_reader = None
 
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="OCR direkt auf dem Handy: Foto aufnehmen oder vorhandenes Bild laden, "
-        "mit OpenCV vorverarbeiten und per Tesseract auslesen."
+        description="OCR direkt auf dem Handy (Pydroid 3 oder Termux): Foto aufnehmen oder "
+        "vorhandenes Bild laden, mit OpenCV vorverarbeiten und per OCR-Engine auslesen."
     )
     parser.add_argument("--image", help="Pfad zu einem vorhandenen Foto (z. B. /sdcard/DCIM/foto.jpg)")
     parser.add_argument("--camera", action="store_true",
                         help="Foto mit der Kamera des Geraets aufnehmen (Standard, wenn --image fehlt)")
     parser.add_argument("--camera-id", type=int, default=0, help="Kamera-ID (0 = meist Hauptkamera)")
-    parser.add_argument("--lang", default="deu+eng", help="Tesseract-Sprachen, z. B. deu, eng, deu+eng")
-    parser.add_argument("--psm", type=int, default=3, help="Tesseract Page Segmentation Mode (Default: 3)")
+    parser.add_argument("--engine", choices=["auto", "easyocr", "tesseract"], default="auto",
+                        help="OCR-Engine: easyocr (Pydroid 3) oder tesseract (Termux/PC), auto = verfuegbare waehlen")
+    parser.add_argument("--lang", default="deu+eng", help="Sprachen, z. B. deu+eng (Tesseract) bzw. de+en (EasyOCR)")
+    parser.add_argument("--psm", type=int, default=3, help="Tesseract Page Segmentation Mode (Default: 3, nur Tesseract)")
     parser.add_argument("--thresh", choices=["otsu", "adaptive", "none"], default="otsu",
                         help="Binarisierung nach der Vorverarbeitung")
     parser.add_argument("--max-dim", type=int, default=1600,
                         help="Laengere Bildkante wird auf diesen Wert skaliert (Default: 1600)")
     parser.add_argument("--out", default="ocr_output", help="Ausgabeverzeichnis (Default: ocr_output)")
     return parser.parse_args(argv)
+
+
+def capture_with_plyer(path):
+    try:
+        from plyer import camera
+    except Exception:
+        return False
+    try:
+        camera.take_picture(filename=path)
+    except TypeError:
+        try:
+            camera.take_picture(path)
+        except Exception:
+            return False
+    except Exception:
+        return False
+    for _ in range(300):
+        if os.path.isfile(path) and os.path.getsize(path) > 0:
+            return True
+        time.sleep(0.1)
+    return os.path.isfile(path) and os.path.getsize(path) > 0
 
 
 def capture_with_termux(path, camera_id):
@@ -49,6 +82,8 @@ def capture_with_cv2(path, camera_id):
 
 
 def capture_photo(path, camera_id):
+    if capture_with_plyer(path):
+        return "plyer (Pydroid 3 Kamera)"
     if capture_with_termux(path, camera_id):
         return "termux-camera-photo (Handykamera)"
     if capture_with_cv2(path, camera_id):
@@ -81,7 +116,7 @@ def preprocess(image, method):
     return gray
 
 
-def check_tesseract():
+def tesseract_available():
     try:
         import pytesseract
         pytesseract.get_tesseract_version()
@@ -90,7 +125,53 @@ def check_tesseract():
         return False
 
 
-def run_ocr(image, lang, psm):
+def easyocr_available():
+    try:
+        import easyocr  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def select_engine(requested):
+    if requested == "tesseract":
+        if tesseract_available():
+            return "tesseract"
+        raise RuntimeError(
+            "Tesseract wurde nicht gefunden. Termux: 'pkg install tesseract' | "
+            "PC: 'sudo apt install tesseract-ocr' | Pydroid 3: --engine easyocr nutzen."
+        )
+    if requested == "easyocr":
+        if easyocr_available():
+            return "easyocr"
+        raise RuntimeError(
+            "easyocr ist nicht installiert. Pydroid 3: 'pip install easyocr' "
+            "(legt die Modelle beim ersten Start automatisch in ~/.EasyOCR ab)."
+        )
+    if tesseract_available():
+        return "tesseract"
+    if easyocr_available():
+        return "easyocr"
+    raise RuntimeError(
+        "Keine OCR-Engine gefunden. Installiere entweder Tesseract "
+        "(Termux: pkg install tesseract / PC: apt install tesseract-ocr) "
+        "oder easyocr (Pydroid 3: pip install easyocr)."
+    )
+
+
+def easyocr_langs(lang):
+    return [TESS_TO_EASYOCR.get(part, part) for part in lang.split("+")]
+
+
+def get_easy_reader(langs):
+    global _easy_reader
+    if _easy_reader is None:
+        import easyocr
+        _easy_reader = easyocr.Reader(langs, gpu=False)
+    return _easy_reader
+
+
+def run_ocr_tesseract(image, lang, psm):
     import pytesseract
     from pytesseract import Output
     config = f"--psm {psm}"
@@ -106,20 +187,48 @@ def run_ocr(image, lang, psm):
             data = pytesseract.image_to_data(image, lang="eng", config=config, output_type=Output.DICT)
         else:
             raise
-    return text.strip(), data
-
-
-def annotate(image, data):
-    annotated = image.copy()
+    words = []
     for i in range(len(data["text"])):
         word = str(data["text"][i]).strip()
         try:
             conf = float(data["conf"][i])
         except (TypeError, ValueError):
             conf = -1.0
+        if word:
+            box = (data["left"][i], data["top"][i], data["width"][i], data["height"][i])
+            words.append((word, conf, box))
+    return text.strip(), words
+
+
+def run_ocr_easyocr(image, lang):
+    reader = get_easy_reader(easyocr_langs(lang))
+    if image.ndim == 2:
+        rgb = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+    else:
+        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    results = reader.readtext(rgb)
+    words = []
+    texts = []
+    for bbox, text, conf in results:
+        xs = [point[0] for point in bbox]
+        ys = [point[1] for point in bbox]
+        x, y = int(min(xs)), int(min(ys))
+        box = (x, y, int(max(xs)) - x, int(max(ys)) - y)
+        words.append((text, float(conf) * 100.0, box))
+        texts.append(text)
+    return " ".join(texts), words
+
+
+def run_ocr(image, lang, psm, engine):
+    if engine == "easyocr":
+        return run_ocr_easyocr(image, lang)
+    return run_ocr_tesseract(image, lang, psm)
+
+
+def annotate(image, words):
+    annotated = image.copy()
+    for word, conf, (x, y, w, h) in words:
         if word and conf > 60:
-            x, y = data["left"][i], data["top"][i]
-            w, h = data["width"][i], data["height"][i]
             cv2.rectangle(annotated, (x, y), (x + w, y + h), (0, 255, 0), 2)
     return annotated
 
@@ -129,11 +238,12 @@ def main(argv=None):
     if args.image is None and not args.camera:
         args.camera = True
 
-    if not check_tesseract():
-        print("Fehler: Tesseract wurde nicht gefunden oder ist nicht installiert.", file=sys.stderr)
-        print("Auf dem Handy (Termux):  pkg install tesseract", file=sys.stderr)
-        print("Auf dem PC:              sudo apt install tesseract-ocr", file=sys.stderr)
+    try:
+        engine = select_engine(args.engine)
+    except RuntimeError as exc:
+        print(f"Fehler: {exc}", file=sys.stderr)
         return 2
+    print(f"OCR-Engine: {engine}")
 
     os.makedirs(args.out, exist_ok=True)
 
@@ -149,16 +259,16 @@ def main(argv=None):
             source = capture_photo(photo_path, args.camera_id)
             if source is None:
                 print("Fehler: Keine Kamera erreichbar.", file=sys.stderr)
-                print("Termux: 'pkg install termux-api', Termux:API-App installieren "
-                      "und Kamera-Berechtigung erlauben.", file=sys.stderr)
+                print("Pydroid 3: 'pip install plyer' und Kamera-Berechtigung der App erlauben.", file=sys.stderr)
+                print("Termux:    'pkg install termux-api' + Termux:API-App.", file=sys.stderr)
                 print("Oder vorhandenes Foto nutzen: --image PFAD", file=sys.stderr)
                 return 2
 
         print(f"Bildquelle: {source}")
         original = load_and_resize(photo_path, args.max_dim)
         processed = preprocess(original, args.thresh)
-        text, data = run_ocr(processed, args.lang, args.psm)
-        annotated = annotate(original, data)
+        text, words = run_ocr(processed, args.lang, args.psm, engine)
+        annotated = annotate(original, words)
 
         text_path = os.path.join(args.out, "ocr_text.txt")
         annotated_path = os.path.join(args.out, "ocr_annotated.jpg")

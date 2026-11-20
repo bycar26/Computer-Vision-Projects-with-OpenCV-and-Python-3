@@ -1,0 +1,9 @@
+# Installation direkt in Pydroid 3 (Terminal/Tippe auf das Terminal-Icon, dann):
+#   pip install -r requirements-pydroid.txt
+# cv2 ist in Pydroid 3 oft bereits vorinstalliert; opencv-python wird nur installiert, falls noetig.
+opencv-python
+easyocr
+plyer
+Pillow
+numpy
+pytesseract
