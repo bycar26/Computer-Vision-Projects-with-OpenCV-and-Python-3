@@ -37,6 +37,10 @@ figure()
 imshow(imread(testfile))
 ```
 
+## Mobile OCR – Texterkennung direkt auf dem Smartphone
+
+Im Ordner [MobileOCR](MobileOCR/) findest du eine Schrifterkennungssoftware (Python + OpenCV + EasyOCR/Tesseract) mit Basis **Pydroid 3**, die direkt auf einem Android-Handy läuft: Foto mit der Handykamera aufnehmen, mit OpenCV vorverarbeiten und den Text lokal auslesen (Termux als Alternative). Siehe [MobileOCR/README.md](MobileOCR/README.md) für Installation und Benutzung.
+
 **Following is what you need for this book:**
 Python programmers and machine learning developers who wish to build exciting Computer Vision projects using the power of machine learning and OpenCV will find this book useful. The only prerequisite for this book is that you should have a sound knowledge of Python programming.
 

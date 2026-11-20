@@ -1,0 +1,5 @@
+# Zum Testen auf dem PC. Auf dem Handy (Termux) siehe install_termux.sh,
+# in Pydroid 3 ist cv2 bereits vorinstalliert.
+opencv-python-headless
+pytesseract
+Pillow
